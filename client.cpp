@@ -132,7 +132,7 @@ int main(int argc, char* argv[]) {
     }
     if (NA < 4) NA = 4; // mínimo de 4
 
-    printf("NA=%d NT=%d\n", NA, NT);
+    printf("NA=%d, NT=%d\n", NA, NT);
 
     // === Passo 2: Loop de tentativas ===
     int seq = 1;
