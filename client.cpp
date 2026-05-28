@@ -257,7 +257,7 @@ int main(int argc, char* argv[]) {
         char secret_str[9];
 
         for (int i = 0; i < NA; i++) {
-            secret_str[i] = (char)res_msg.a[i];
+            secret_str[i] = '0' + res_msg.a[i];
         }
 
         secret_str[NA] = '\0';
