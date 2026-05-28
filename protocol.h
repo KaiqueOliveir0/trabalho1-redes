@@ -1,7 +1,8 @@
+//Caio Eloi Campos e Kaique de Oliveira e Silva
+
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
 
-#include <cstdint>
 #include <cstring>
 #include <arpa/inet.h>
 
@@ -12,57 +13,68 @@
 #define MSG_ERR 5
 
 #define MAX_DIGITS 8
+
+// mensagens pequenas: HEL, BYE e ERR
 #define MSG_SIZE_SHORT 4
+
+// mensagens com campo A: TRY e RES
 #define MSG_SIZE_FULL 12
 
 struct Message {
-    uint8_t tipo;
-    uint8_t checksum;
-    uint16_t seqnum;
-    uint8_t a[8];
+    unsigned char tipo;
+    unsigned char checksum;
+    unsigned short seqnum;
+    unsigned char a[8];
 };
 
-inline bool verify_checksum(const uint8_t *buf, int size) {
-    uint8_t recebido = buf[1];
-    uint8_t soma = 0;
+// confere se o checksum bate
+inline bool verify_checksum(const unsigned char *buf, int size) {
+    unsigned char recebido = buf[1];
+    unsigned char calc = 0;
 
     for (int i = 0; i < size; i++) {
-        if (i == 1) soma ^= 0;
-        else soma ^= buf[i];
+        if (i == 1) {
+            calc ^= 0; // checksum entra como zero na conta
+        } else {
+            calc ^= buf[i];
+        }
     }
 
-    return soma == recebido;
+    return calc == recebido;
 }
 
-inline void serialize(const Message& msg, uint8_t *buf, int size) {
+// coloca a struct no buffer, usando big endian no seq
+inline void serialize(const Message& msg, unsigned char *buf, int size) {
     buf[0] = msg.tipo;
     buf[1] = msg.checksum;
 
-    uint16_t s = htons(msg.seqnum);
-    memcpy(buf + 2, &s, 2);
+    unsigned short seq_rede = htons(msg.seqnum);
+    memcpy(buf + 2, &seq_rede, 2);
 
     if (size == MSG_SIZE_FULL) {
         memcpy(buf + 4, msg.a, 8);
     }
 }
 
-inline void deserialize(const uint8_t *buf, int size, Message& msg) {
+// pega os bytes recebidos e joga pra struct
+inline void deserialize(const unsigned char *buf, int size, Message& msg) {
     memset(&msg, 0, sizeof(Message));
 
     msg.tipo = buf[0];
     msg.checksum = buf[1];
 
-    uint16_t s;
-    memcpy(&s, buf + 2, 2);
-    msg.seqnum = ntohs(s);
+    unsigned short seq_rede;
+    memcpy(&seq_rede, buf + 2, 2);
+    msg.seqnum = ntohs(seq_rede);
 
     if (size == MSG_SIZE_FULL) {
         memcpy(msg.a, buf + 4, 8);
     }
 }
 
-inline void make_message(Message& msg, uint8_t tipo, uint16_t seq,
-                         const uint8_t *dados, int qtd, int size) {
+// monta msg e calcula checksum no final
+inline void make_message(Message& msg, unsigned char tipo, unsigned short seq,
+                         const unsigned char *dados, int qtd, int size) {
     memset(&msg, 0, sizeof(Message));
 
     msg.tipo = tipo;
@@ -74,20 +86,20 @@ inline void make_message(Message& msg, uint8_t tipo, uint16_t seq,
         }
     }
 
-    uint8_t buf[MSG_SIZE_FULL];
+    unsigned char buf[MSG_SIZE_FULL];
     memset(buf, 0, sizeof(buf));
 
     buf[0] = msg.tipo;
     buf[1] = 0;
 
-    uint16_t s = htons(msg.seqnum);
-    memcpy(buf + 2, &s, 2);
+    unsigned short seq_rede = htons(msg.seqnum);
+    memcpy(buf + 2, &seq_rede, 2);
 
     if (size == MSG_SIZE_FULL) {
         memcpy(buf + 4, msg.a, 8);
     }
 
-    uint8_t cs = 0;
+    unsigned char cs = 0;
     for (int i = 0; i < size; i++) {
         cs ^= buf[i];
     }
