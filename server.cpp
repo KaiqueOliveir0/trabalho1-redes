@@ -1,7 +1,3 @@
-// Caio Eloi
-// server.cpp — Servidor UDP para o jogo de senha (Mastermind)
-// Uso: ./server <porta> <senha> <NT>
-
 #include <iostream>
 #include <cstdio>
 #include <cstdlib>
@@ -15,427 +11,313 @@
 #include <unistd.h>
 #include "protocol.h"
 
-struct ClientSession {
-    struct sockaddr_in addr;
-    socklen_t addrlen;
-    bool active;
-    bool finished;
-    int tries_used;
-    uint16_t last_seqnum;
-
-    uint8_t last_resp_buf[MSG_SIZE_FULL];
-    int last_resp_size;
-    bool has_last_resp;
+struct Sessao {
+    sockaddr_in endereco;
+    socklen_t tam_endereco;
+    bool ativa;
+    bool terminou;
+    int tentativas;
+    uint16_t ultima_seq;
+    uint8_t ultima_resposta[MSG_SIZE_FULL];
+    int tam_ultima;
+    bool tem_ultima;
 };
 
-bool same_addr(const struct sockaddr_in& a, const struct sockaddr_in& b) {
-    return a.sin_addr.s_addr == b.sin_addr.s_addr &&
-           a.sin_port == b.sin_port;
+bool mesmo_cliente(sockaddr_in a, sockaddr_in b) {
+    return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
 }
 
-std::string random_password(int len) {
-    int digits[10] = {0,1,2,3,4,5,6,7,8,9};
+bool senha_valida(std::string s) {
+    if (s.size() < 4 || s.size() > 8) return false;
 
-    for (int i = 9; i > 0; i--) {
-        int j = rand() % (i + 1);
-        int tmp = digits[i];
-        digits[i] = digits[j];
-        digits[j] = tmp;
+    bool visto[10];
+    memset(visto, 0, sizeof(visto));
+
+    for (int i = 0; i < (int)s.size(); i++) {
+        if (s[i] < '0' || s[i] > '9') return false;
+        int d = s[i] - '0';
+        if (visto[d]) return false;
+        visto[d] = true;
     }
-
-    std::string s;
-    for (int i = 0; i < len; i++) {
-        s += ('0' + digits[i]);
-    }
-
-    return s;
-}
-
-bool valid_password(const std::string& pw) {
-    int n = pw.size();
-
-    if (n < 4 || n > 8) {
-        return false;
-    }
-
-    bool seen[10] = {false};
-
-    for (char c : pw) {
-        if (c < '0' || c > '9') {
-            return false;
-        }
-
-        int d = c - '0';
-
-        if (seen[d]) {
-            return false;
-        }
-
-        seen[d] = true;
-    }
-
     return true;
 }
 
-void evaluate(const std::string& secret, const uint8_t* guess, int na,
-              uint8_t* resp) {
-    bool used_secret[8] = {false};
-    bool used_guess[8]  = {false};
+std::string sorteia_senha(int n) {
+    int d[10] = {0,1,2,3,4,5,6,7,8,9};
 
-    for (int i = 0; i < na; i++) {
-        if (guess[i] == (uint8_t)(secret[i] - '0')) {
+    for (int i = 0; i < 10; i++) {
+        int j = rand() % 10;
+        int aux = d[i];
+        d[i] = d[j];
+        d[j] = aux;
+    }
+
+    std::string s;
+    for (int i = 0; i < n; i++) s += (char)('0' + d[i]);
+    return s;
+}
+
+void calcula_resposta(std::string senha, uint8_t *palpite, int n, uint8_t *resp) {
+    bool usou_senha[8];
+    bool usou_palpite[8];
+
+    memset(usou_senha, 0, sizeof(usou_senha));
+    memset(usou_palpite, 0, sizeof(usou_palpite));
+
+    for (int i = 0; i < n; i++) resp[i] = '-';
+
+    for (int i = 0; i < n; i++) {
+        if (palpite[i] == senha[i] - '0') {
             resp[i] = '*';
-            used_secret[i] = true;
-            used_guess[i]  = true;
+            usou_senha[i] = true;
+            usou_palpite[i] = true;
         }
     }
 
-    for (int i = 0; i < na; i++) {
-        if (used_guess[i]) {
-            continue;
-        }
+    for (int i = 0; i < n; i++) {
+        if (usou_palpite[i]) continue;
 
-        for (int j = 0; j < na; j++) {
-            if (used_secret[j]) {
-                continue;
-            }
+        for (int j = 0; j < n; j++) {
+            if (usou_senha[j]) continue;
 
-            if (guess[i] == (uint8_t)(secret[j] - '0')) {
+            if (palpite[i] == senha[j] - '0') {
                 resp[i] = '+';
-                used_secret[j] = true;
-                used_guess[i]  = true;
+                usou_senha[j] = true;
                 break;
             }
         }
-
-        if (!used_guess[i]) {
-            resp[i] = '-';
-        }
     }
 }
 
-void send_msg(int sockfd, const uint8_t* buf, int size,
-              const struct sockaddr_in& addr, socklen_t addrlen) {
-    sendto(sockfd, buf, size, 0,
-           (struct sockaddr*)&addr, addrlen);
+void envia(int sock, uint8_t *buf, int tam, sockaddr_in end, socklen_t tam_end) {
+    sendto(sock, buf, tam, 0, (sockaddr*)&end, tam_end);
 }
 
-int main(int argc, char* argv[]) {
+void guarda(Sessao& s, uint8_t *buf, int tam) {
+    memcpy(s.ultima_resposta, buf, tam);
+    s.tam_ultima = tam;
+    s.tem_ultima = true;
+}
+
+int main(int argc, char *argv[]) {
     if (argc != 4) {
         fprintf(stderr, "Uso: %s <porta> <senha> <NT>\n", argv[0]);
         return 1;
     }
 
-    int port = atoi(argv[1]);
-    std::string password_arg = argv[2];
+    int porta = atoi(argv[1]);
+    std::string senha = argv[2];
     int NT = atoi(argv[3]);
 
-    if (NT < 1) {
-        fprintf(stderr, "NT deve ser >= 1\n");
+    if (NT < 1) return 1;
+
+    bool so_zero = true;
+    for (int i = 0; i < (int)senha.size(); i++) {
+        if (senha[i] != '0') so_zero = false;
+    }
+
+    if (senha.size() < 4 || senha.size() > 8) return 1;
+
+    if (so_zero) {
+        srand(time(NULL));
+        senha = sorteia_senha(senha.size());
+    } else if (!senha_valida(senha)) {
         return 1;
     }
 
-    std::string secret;
-    int na;
+    int NA = senha.size();
 
-    bool all_zeros = true;
-    int zeros_len = password_arg.size();
-
-    if (zeros_len >= 4 && zeros_len <= 8) {
-        for (char c : password_arg) {
-            if (c != '0') {
-                all_zeros = false;
-                break;
-            }
-        }
-    } else {
-        all_zeros = false;
-    }
-
-    if (all_zeros) {
-        srand((unsigned)time(NULL));
-        secret = random_password(zeros_len);
-        na = zeros_len;
-    } else {
-        if (!valid_password(password_arg)) {
-            fprintf(stderr, "Senha inválida: %s\n", password_arg.c_str());
-            return 1;
-        }
-
-        secret = password_arg;
-        na = secret.size();
-    }
-
-    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-
-    if (sockfd < 0) {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
         perror("socket");
         return 1;
     }
 
-    struct sockaddr_in srv_addr;
-    memset(&srv_addr, 0, sizeof(srv_addr));
+    sockaddr_in serv;
+    memset(&serv, 0, sizeof(serv));
+    serv.sin_family = AF_INET;
+    serv.sin_addr.s_addr = INADDR_ANY;
+    serv.sin_port = htons(porta);
 
-    srv_addr.sin_family      = AF_INET;
-    srv_addr.sin_addr.s_addr = INADDR_ANY;
-    srv_addr.sin_port        = htons(port);
-
-    if (bind(sockfd, (struct sockaddr*)&srv_addr, sizeof(srv_addr)) < 0) {
+    if (bind(sock, (sockaddr*)&serv, sizeof(serv)) < 0) {
         perror("bind");
-        close(sockfd);
+        close(sock);
         return 1;
     }
 
-    int clients_served = 0;
-    const int MAX_CLIENTS = 2;
+    Sessao sessoes[2];
+    memset(sessoes, 0, sizeof(sessoes));
 
-    ClientSession sessions[2];
-    memset(sessions, 0, sizeof(sessions));
+    int qtd_sessoes = 0;
+    int finalizados = 0;
 
-    int num_sessions = 0;
-
-    while (clients_served < MAX_CLIENTS) {
+    while (finalizados < 2) {
         uint8_t buf[MSG_SIZE_FULL];
+        sockaddr_in cliente;
+        socklen_t tam_cliente = sizeof(cliente);
 
-        struct sockaddr_in cli_addr;
-        socklen_t cli_len = sizeof(cli_addr);
+        int lidos = recvfrom(sock, buf, sizeof(buf), 0,
+                             (sockaddr*)&cliente, &tam_cliente);
 
-        int n = recvfrom(sockfd, buf, sizeof(buf), 0,
-                         (struct sockaddr*)&cli_addr, &cli_len);
-
-        if (n < MSG_SIZE_SHORT) {
-            continue;
-        }
+        if (lidos < MSG_SIZE_SHORT) continue;
 
         uint8_t tipo = buf[0];
+        if (tipo == MSG_RES) continue;
 
-        if (tipo == MSG_RES) {
-            continue;
-        }
+        int tam_msg = (lidos >= MSG_SIZE_FULL) ? MSG_SIZE_FULL : MSG_SIZE_SHORT;
+        if (!verify_checksum(buf, tam_msg)) continue;
 
-        int msg_size = (n >= MSG_SIZE_FULL) ? MSG_SIZE_FULL : MSG_SIZE_SHORT;
-
-        if (!verify_checksum(buf, msg_size)) {
-            continue;
-        }
-
-        int sess_idx = -1;
-
-        for (int i = 0; i < num_sessions; i++) {
-            if (sessions[i].active &&
-                same_addr(sessions[i].addr, cli_addr)) {
-                sess_idx = i;
+        int pos = -1;
+        for (int i = 0; i < qtd_sessoes; i++) {
+            if (sessoes[i].ativa && mesmo_cliente(sessoes[i].endereco, cliente)) {
+                pos = i;
                 break;
             }
         }
 
         Message msg;
-        deserialize(buf, msg_size, msg);
+        deserialize(buf, tam_msg, msg);
 
         if (tipo == MSG_HEL) {
-            if (sess_idx >= 0) {
-                if (sessions[sess_idx].has_last_resp) {
-                    send_msg(sockfd,
-                             sessions[sess_idx].last_resp_buf,
-                             sessions[sess_idx].last_resp_size,
-                             cli_addr,
-                             cli_len);
+            if (pos != -1) {
+                if (sessoes[pos].tem_ultima) {
+                    envia(sock, sessoes[pos].ultima_resposta,
+                          sessoes[pos].tam_ultima, cliente, tam_cliente);
                 }
-
                 continue;
             }
 
-            if (num_sessions >= 2) {
+            if (qtd_sessoes >= 2) continue;
+
+            pos = qtd_sessoes;
+            qtd_sessoes++;
+
+            memset(&sessoes[pos], 0, sizeof(Sessao));
+            sessoes[pos].ativa = true;
+            sessoes[pos].terminou = false;
+            sessoes[pos].endereco = cliente;
+            sessoes[pos].tam_endereco = tam_cliente;
+
+            uint8_t dados[8];
+            memset(dados, '?', sizeof(dados));
+
+            Message resp;
+            uint8_t resp_buf[MSG_SIZE_FULL];
+
+            make_message(resp, MSG_RES, NT, dados, NA, MSG_SIZE_FULL);
+            serialize(resp, resp_buf, MSG_SIZE_FULL);
+
+            envia(sock, resp_buf, MSG_SIZE_FULL, cliente, tam_cliente);
+            guarda(sessoes[pos], resp_buf, MSG_SIZE_FULL);
+        }
+        else if (tipo == MSG_TRY) {
+            if (pos == -1) {
+                Message erro;
+                uint8_t erro_buf[MSG_SIZE_SHORT];
+                make_message(erro, MSG_ERR, 0, NULL, 0, MSG_SIZE_SHORT);
+                serialize(erro, erro_buf, MSG_SIZE_SHORT);
+                envia(sock, erro_buf, MSG_SIZE_SHORT, cliente, tam_cliente);
                 continue;
             }
 
-            int si = num_sessions++;
+            Sessao& s = sessoes[pos];
 
-            memset(&sessions[si], 0, sizeof(ClientSession));
-
-            sessions[si].active = true;
-            sessions[si].finished = false;
-            sessions[si].addr = cli_addr;
-            sessions[si].addrlen = cli_len;
-            sessions[si].tries_used = 0;
-            sessions[si].last_seqnum = 0;
-            sessions[si].has_last_resp = false;
-
-            uint8_t resp_digits[8];
-            memset(resp_digits, '?', 8);
-
-            Message res_msg;
-            make_message(res_msg, MSG_RES, (uint16_t)NT,
-                         resp_digits, na, MSG_SIZE_FULL);
-
-            uint8_t res_buf[MSG_SIZE_FULL];
-            serialize(res_msg, res_buf, MSG_SIZE_FULL);
-
-            send_msg(sockfd, res_buf, MSG_SIZE_FULL, cli_addr, cli_len);
-
-            memcpy(sessions[si].last_resp_buf, res_buf, MSG_SIZE_FULL);
-            sessions[si].last_resp_size = MSG_SIZE_FULL;
-            sessions[si].has_last_resp = true;
-
-        } else if (tipo == MSG_TRY) {
-            if (sess_idx < 0) {
-                Message err_msg;
-                make_message(err_msg, MSG_ERR, 0, nullptr, 0, MSG_SIZE_SHORT);
-
-                uint8_t err_buf[MSG_SIZE_SHORT];
-                serialize(err_msg, err_buf, MSG_SIZE_SHORT);
-
-                send_msg(sockfd, err_buf, MSG_SIZE_SHORT, cli_addr, cli_len);
+            if (s.tem_ultima && msg.seqnum == s.ultima_seq) {
+                envia(sock, s.ultima_resposta, s.tam_ultima, cliente, tam_cliente);
                 continue;
             }
 
-            ClientSession& sess = sessions[sess_idx];
-
-            uint16_t seqnum = msg.seqnum;
-            int expected_seq = sess.tries_used + 1;
-
-            if (sess.has_last_resp && seqnum == sess.last_seqnum) {
-                send_msg(sockfd,
-                         sess.last_resp_buf,
-                         sess.last_resp_size,
-                         cli_addr,
-                         cli_len);
+            int esperado = s.tentativas + 1;
+            if ((int)msg.seqnum != esperado) {
+                Message erro;
+                uint8_t erro_buf[MSG_SIZE_SHORT];
+                make_message(erro, MSG_ERR, 0, NULL, 0, MSG_SIZE_SHORT);
+                serialize(erro, erro_buf, MSG_SIZE_SHORT);
+                envia(sock, erro_buf, MSG_SIZE_SHORT, cliente, tam_cliente);
+                guarda(s, erro_buf, MSG_SIZE_SHORT);
+                s.ultima_seq = msg.seqnum;
                 continue;
             }
 
-            if ((int)seqnum != expected_seq) {
-                Message err_msg;
-                make_message(err_msg, MSG_ERR, 0, nullptr, 0, MSG_SIZE_SHORT);
-
-                uint8_t err_buf[MSG_SIZE_SHORT];
-                serialize(err_msg, err_buf, MSG_SIZE_SHORT);
-
-                send_msg(sockfd, err_buf, MSG_SIZE_SHORT, cli_addr, cli_len);
-
-                memcpy(sess.last_resp_buf, err_buf, MSG_SIZE_SHORT);
-                sess.last_resp_size = MSG_SIZE_SHORT;
-                sess.has_last_resp = true;
-                sess.last_seqnum = seqnum;
-
+            if (s.tentativas >= NT) {
+                Message erro;
+                uint8_t erro_buf[MSG_SIZE_SHORT];
+                make_message(erro, MSG_ERR, 0, NULL, 0, MSG_SIZE_SHORT);
+                serialize(erro, erro_buf, MSG_SIZE_SHORT);
+                envia(sock, erro_buf, MSG_SIZE_SHORT, cliente, tam_cliente);
                 continue;
             }
 
-            if (sess.tries_used >= NT) {
-                Message err_msg;
-                make_message(err_msg, MSG_ERR, 0, nullptr, 0, MSG_SIZE_SHORT);
+            bool ok = true;
+            bool visto[10];
+            memset(visto, 0, sizeof(visto));
 
-                uint8_t err_buf[MSG_SIZE_SHORT];
-                serialize(err_msg, err_buf, MSG_SIZE_SHORT);
-
-                send_msg(sockfd, err_buf, MSG_SIZE_SHORT, cli_addr, cli_len);
-                continue;
-            }
-
-            bool proposal_valid = true;
-            bool seen[10] = {false};
-
-            for (int i = 0; i < na; i++) {
-                uint8_t d = msg.a[i];
-
-                if (d > 9) {
-                    proposal_valid = false;
+            for (int i = 0; i < NA; i++) {
+                int d = msg.a[i];
+                if (d < 0 || d > 9 || visto[d]) {
+                    ok = false;
                     break;
                 }
-
-                if (seen[d]) {
-                    proposal_valid = false;
-                    break;
-                }
-
-                seen[d] = true;
+                visto[d] = true;
             }
 
-            if (!proposal_valid) {
-                sess.tries_used++;
+            if (!ok) {
+                s.tentativas++;
 
-                Message err_msg;
-                make_message(err_msg, MSG_ERR, seqnum, nullptr, 0, MSG_SIZE_SHORT);
+                Message erro;
+                uint8_t erro_buf[MSG_SIZE_SHORT];
+                make_message(erro, MSG_ERR, msg.seqnum, NULL, 0, MSG_SIZE_SHORT);
+                serialize(erro, erro_buf, MSG_SIZE_SHORT);
 
-                uint8_t err_buf[MSG_SIZE_SHORT];
-                serialize(err_msg, err_buf, MSG_SIZE_SHORT);
-
-                send_msg(sockfd, err_buf, MSG_SIZE_SHORT, cli_addr, cli_len);
-
-                memcpy(sess.last_resp_buf, err_buf, MSG_SIZE_SHORT);
-                sess.last_resp_size = MSG_SIZE_SHORT;
-                sess.has_last_resp = true;
-                sess.last_seqnum = seqnum;
-
+                envia(sock, erro_buf, MSG_SIZE_SHORT, cliente, tam_cliente);
+                guarda(s, erro_buf, MSG_SIZE_SHORT);
+                s.ultima_seq = msg.seqnum;
                 continue;
             }
 
-            uint8_t resp_chars[8];
-            memset(resp_chars, '-', 8);
+            uint8_t resposta[8];
+            calcula_resposta(senha, msg.a, NA, resposta);
 
-            evaluate(secret, msg.a, na, resp_chars);
+            s.tentativas++;
 
-            sess.tries_used++;
+            Message resp;
+            uint8_t resp_buf[MSG_SIZE_FULL];
+            make_message(resp, MSG_RES, NT - s.tentativas,
+                         resposta, NA, MSG_SIZE_FULL);
+            serialize(resp, resp_buf, MSG_SIZE_FULL);
 
-            int remaining = NT - sess.tries_used;
+            envia(sock, resp_buf, MSG_SIZE_FULL, cliente, tam_cliente);
+            guarda(s, resp_buf, MSG_SIZE_FULL);
+            s.ultima_seq = msg.seqnum;
+        }
+        else if (tipo == MSG_BYE) {
+            if (pos == -1) continue;
 
-            Message res_msg;
-            make_message(res_msg, MSG_RES, (uint16_t)remaining,
-                         resp_chars, na, MSG_SIZE_FULL);
+            Sessao& s = sessoes[pos];
 
-            uint8_t res_buf[MSG_SIZE_FULL];
-            serialize(res_msg, res_buf, MSG_SIZE_FULL);
-
-            send_msg(sockfd, res_buf, MSG_SIZE_FULL, cli_addr, cli_len);
-
-            memcpy(sess.last_resp_buf, res_buf, MSG_SIZE_FULL);
-            sess.last_resp_size = MSG_SIZE_FULL;
-            sess.has_last_resp = true;
-            sess.last_seqnum = seqnum;
-
-        } else if (tipo == MSG_BYE) {
-            if (sess_idx < 0) {
+            if (s.terminou) {
+                envia(sock, s.ultima_resposta, s.tam_ultima, cliente, tam_cliente);
                 continue;
             }
 
-            ClientSession& sess = sessions[sess_idx];
+            uint8_t dados[8];
+            memset(dados, 0, sizeof(dados));
+            for (int i = 0; i < NA; i++) dados[i] = senha[i] - '0';
 
-            if (sess.finished) {
-                send_msg(sockfd,
-                         sess.last_resp_buf,
-                         sess.last_resp_size,
-                         cli_addr,
-                         cli_len);
-                continue;
-            }
+            Message resp;
+            uint8_t resp_buf[MSG_SIZE_FULL];
 
-            uint8_t secret_digits[8];
-            memset(secret_digits, 0, 8);
+            make_message(resp, MSG_RES, 0xFFFF, dados, NA, MSG_SIZE_FULL);
+            serialize(resp, resp_buf, MSG_SIZE_FULL);
 
-            for (int i = 0; i < na; i++) {
-                secret_digits[i] = secret[i] - '0';
-            }
+            envia(sock, resp_buf, MSG_SIZE_FULL, cliente, tam_cliente);
+            guarda(s, resp_buf, MSG_SIZE_FULL);
 
-            Message res_msg;
-            make_message(res_msg, MSG_RES, (uint16_t)0xFFFF,
-                         secret_digits, na, MSG_SIZE_FULL);
-
-            uint8_t res_buf[MSG_SIZE_FULL];
-            serialize(res_msg, res_buf, MSG_SIZE_FULL);
-
-            send_msg(sockfd, res_buf, MSG_SIZE_FULL, cli_addr, cli_len);
-
-            memcpy(sess.last_resp_buf, res_buf, MSG_SIZE_FULL);
-            sess.last_resp_size = MSG_SIZE_FULL;
-            sess.has_last_resp = true;
-
-            sess.finished = true;
-            clients_served++;
-
-        } else if (tipo == MSG_ERR) {
-            continue;
+            s.terminou = true;
+            finalizados++;
         }
     }
 
-    close(sockfd);
+    close(sock);
     return 0;
 }

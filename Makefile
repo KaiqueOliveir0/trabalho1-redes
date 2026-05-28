@@ -1,16 +1,13 @@
-# Caio Eloi
-# Makefile para o Trabalho 1 de Redes — Jogo de Senha (Mastermind)
-
-CXX      = g++
+CXX = g++
 CXXFLAGS = -std=c++11 -Wall -O2
 
 all: server client
 
 server: server.cpp protocol.h
-	$(CXX) $(CXXFLAGS) -o server server.cpp
+	$(CXX) $(CXXFLAGS) server.cpp -o server
 
 client: client.cpp protocol.h
-	$(CXX) $(CXXFLAGS) -o client client.cpp
+	$(CXX) $(CXXFLAGS) client.cpp -o client
 
 run_serv: server
 	./server $(arg1) $(arg2) $(arg3)
